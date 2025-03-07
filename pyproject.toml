@@ -9,12 +9,12 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.11"
-jinja2 = "^3.1.5"
-pydantic = "^2.10.6"
-tiktoken = "^0.8.0"
-litellm = "^1.60.6"
-instructor = "^1.7.2"
+python = "*"
+jinja2 = "*"
+pydantic = "*"
+tiktoken = "*"
+litellm = "*"
+instructor = "1.7.3"
 
 
 [build-system]
