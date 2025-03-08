@@ -16,7 +16,6 @@ tiktoken = "*"
 litellm = "*"
 instructor = "1.7.3"
 
-
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

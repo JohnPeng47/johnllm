@@ -7,6 +7,9 @@ import json
 import functools
 import time
 import jinja2
+from textwrap import dedent
+from openai import OpenAI
+import os
 
 from pydantic import BaseModel
 import tiktoken
@@ -17,6 +20,7 @@ from litellm.types.utils import ModelResponse
 from pydantic import BaseModel
 
 from .models import CompletionUsage
+from .clients import deepseek_client, deepseek_cost
 
 def convert_instructor_usage(raw_response):
     raw_response.usage = CompletionUsage(**raw_response.usage.dict())
@@ -33,6 +37,59 @@ SHORT_NAMES = {
     "claude" : "claude-3-5-sonnet-20240620",
     "deepseek" : "deepseek/deepseek-chat"
 }
+
+### TEMPORARY INSTRUCTOR IMPLEMENATION FOR DEEPSEEK
+def deepseek_cost(usage):
+    input_token_cost = usage.prompt_tokens * 2.7e-7
+    ouptut_token_cost = (usage.total_tokens - usage.prompt_tokens) * 0.0000011
+    return input_token_cost + ouptut_token_cost
+
+def deepseek_instructor():
+    class DeepseekClient:
+        def __init__(self):
+            self.chat = self.Chat()
+
+        class Chat:
+            def __init__(self):
+                self.completions = self.Completions()
+
+            class Completions:
+                def create_with_completion(self, 
+                                           model: str = "",
+                                           messages: List = [] , 
+                                           response_model: Type[BaseModel] = None, 
+                                           **kwargs) -> Tuple[Any, Any]:
+                    client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+                    instructor_message = dedent(
+                        f"""
+                        As a genius expert, your task is to understand the content and provide
+                        the parsed objects in json that match the following json_schema:\n
+
+                        {json.dumps(response_model.model_json_schema(), indent=2, ensure_ascii=False)}
+
+                        Make sure to return an instance of the JSON, not the schema itself
+                        """
+                    )
+
+                    if len(messages) > 1:
+                        raise Exception("Only one message is allowed for this task")
+                    else:
+                        messages[0]["content"] = messages[0]["content"] + "\n\n" + instructor_message
+
+                    res = client.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=messages,
+                    )
+                    content = res.choices[0].message.content
+                    # Extract JSON between ```json``` markers if present
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0]
+
+                    parsed = json.loads(content)
+                    return response_model.model_validate(parsed), res
+
+    return DeepseekClient()
+###############################################
 
 class LLMVerificationError(Exception):
     pass
@@ -253,7 +310,6 @@ class LLMModel:
                use_cache: bool = True,
                **kwargs) -> Any:
         """Modified invoke method with caching."""
-
         if isinstance(prompt, str):
             messages = [{
                 "role": "user",
@@ -263,15 +319,25 @@ class LLMModel:
             messages = [m.dict() for m in prompt]
             
         model_name = SHORT_NAMES[model_name]
-        res, raw_response = client.chat.completions.create_with_completion(
+
+        # TODO: hack because litellm/deepseek client does not work with instructor
+        if model_name == "deepseek/deepseek-chat":
+            print("using deepseek client")
+            llm_client = deepseek_instructor()
+            model_name = "deepseek-chat"
+        else:
+            llm_client = client
+
+        print(llm_client)
+        res, raw_response = llm_client.chat.completions.create_with_completion(
             model=model_name,
             messages=messages,
             response_model=response_format,
             **kwargs
         )
-        self.cost += raw_response._hidden_params["response_cost"]
-        print("Cost: ", raw_response._hidden_params["response_cost"])
-
+        cost = raw_response.get("_hidden_params", {}).get("response_cost", 0)
+        
+        self.cost += cost
         return res
     
     def __del__(self):
