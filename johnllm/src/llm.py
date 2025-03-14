@@ -1,26 +1,24 @@
 from typing import Any, Dict, Optional, Type, List, Tuple, Generic, TypeVar
 import inspect
 from pathlib import Path
-import sqlite3
-import hashlib
 import json
-import functools
 import time
 import jinja2
 from textwrap import dedent
 from openai import OpenAI
 import os
+from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 import tiktoken
 
 import instructor   
-from litellm import completion, completion_cost
-from litellm.types.utils import ModelResponse
+from litellm import completion
 from pydantic import BaseModel
 
 from .models import CompletionUsage
-from .clients import deepseek_client, deepseek_cost
+from .ops import OpsList, Op
+from .cache import LLMCache
 
 def convert_instructor_usage(raw_response):
     raw_response.usage = CompletionUsage(**raw_response.usage.dict())
@@ -112,7 +110,8 @@ class LLMModel:
         self,
         use_cache: bool = False,
         configpath: Path = Path(__file__).parent / "cache.yaml",
-        dbpath: Path = Path(__file__).parent / "llm_cache.db"
+        dbpath: Path = Path(__file__).parent / "llm_cache.db",
+        cache: Optional[LLMCache] = None
     ) -> None:
         """
         Initialize the LLM model with the specified provider and configuration.
@@ -123,15 +122,9 @@ class LLMModel:
         self.use_cache = use_cache
         self.config = self._read_config(configpath)
         self.cost = 0
-
-        # Initialize cache-related attributes
-        self.cache_enabled_functions = self._get_cache_enabled_functions()
-        print("Enabled functions: ", "\n".join([f for f, enabled in self.cache_enabled_functions.items() if enabled]))
-
-        self.db_connection = None
         
-        # Initialize cache database
-        self._initialize_cache(dbpath)
+        # Use provided cache or create new one if use_cache is True
+        self.cache = cache if cache is not None else (LLMCache(dbpath) if use_cache else None)
         
         # Add call chain tracking
         self.call_chain = []
@@ -140,10 +133,6 @@ class LLMModel:
         return self.cost
 
     def _read_config(self, fp: Path):
-        # with open(fp, "r") as f:
-        #     config = yaml.safe_load(f)
-        # return config
-        # Cache turned off
         return {}
 
     def _get_caller_info(self):
@@ -151,165 +140,66 @@ class LLMModel:
         caller_frame = frame.f_back.f_back  # Go back one more frame
         caller_function = caller_frame.f_code.co_name
         caller_filename = caller_frame.f_code.co_filename
-
         return caller_filename, caller_function
-        
-    def _get_cache_enabled_functions(self) -> Dict[str, bool]:
-        """Extract function names and their cache states from config."""
-        cache_states = {}
-        for func_name, settings in self.config.items():
-            # Look for cache setting in the list of dictionaries
-            cache_setting = next((item.get('cache') 
-                                for item in settings 
-                                if isinstance(item, dict) and 'cache' in item), 
-                               False)
-            cache_states[func_name] = cache_setting
-        return cache_states
-
-    def _initialize_cache(self, dbpath: Path) -> None:
-        """Initialize SQLite connection and create cache table if it doesn't exist."""
-        self.db_connection = sqlite3.connect(dbpath)
-        cursor = self.db_connection.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS llm_cache (
-                function_name TEXT,
-                model_name TEXT,
-                prompt_hash TEXT,
-                response TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (function_name, model_name, prompt_hash)
-            )
-        """)
-        self.db_connection.commit()
-
-    def _hash_prompt(self, prompt: str, model: str, key: int = 0) -> str:
-        """Create a consistent hash of the prompt with the key used for iterative prompts."""
-        return hashlib.sha256(prompt.encode() + model.encode() + str(key).encode()).hexdigest()
-
-    def _delete_hash(self, function_name: str, model_name: str, prompt_hash: str) -> None:
-        """Delete a specific cache entry by its hash."""
-        if not self.db_connection:
-            return
-            
-        cursor = self.db_connection.cursor()
-        cursor.execute(
-            "DELETE FROM llm_cache WHERE function_name = ? AND model_name = ? AND prompt_hash = ?",
-            (function_name, model_name, prompt_hash)
-        )
-        self.db_connection.commit()
-
-    def _get_cached_response(self, function_name: str, model_name: str, prompt_hash: str) -> Optional[str]:
-        """Retrieve cached response if it exists."""
-        if not self.db_connection:
-            return None
-            
-        cursor = self.db_connection.cursor()
-        cursor.execute(
-            "SELECT response FROM llm_cache WHERE function_name = ? AND model_name = ? AND prompt_hash = ?",
-            (function_name, model_name, prompt_hash)
-        )
-        result = cursor.fetchone()
-        return json.loads(result[0]) if result else None
-
-    def _cache_response(self, function_name: str, model_name: str, prompt_hash: str, response: Any) -> None:
-        """Store response in cache."""
-        if not self.db_connection:
-            return
-                    
-        cursor = self.db_connection.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO llm_cache (function_name, model_name, prompt_hash, response) VALUES (?, ?, ?, ?)",
-            (function_name, model_name, prompt_hash, json.dumps(response))
-        )
-        self.db_connection.commit()
-
-    def cache_llm_response(func):
-        """Method decorator to handle LLM response caching."""
-        @functools.wraps(func)
-        def wrapper(self, 
-                    prompt: str, 
-                    *, 
-                    model_name: str = "gpt-4o", 
-                    response_format: Optional[Type[BaseModel]] = None, 
-                    use_cache: Optional[bool] = None,
-                    delete_cache: bool = False,
-                    key: int = 0,
-                    **kwargs):
-            
-            # Use instance default if use_cache is None
-            use_cache = self.use_cache if use_cache is None else use_cache
-            
-            # Track the call
-            caller_filename, caller_function = self._get_caller_info()
-            self.call_chain.append((caller_filename, caller_function))
-            
-            # Check if caching is enabled for this function
-            # cache_enabled = (use_cache and 
-            #                caller_function in self.cache_enabled_functions and 
-            #                self.cache_enabled_functions[caller_function])
-            cache_enabled = use_cache
-            
-            if delete_cache:
-                self._delete_hash(caller_function, model_name, self._hash_prompt(prompt, model_name, key=key))
-                
-            elif not delete_cache and cache_enabled:
-                # Check cache for existing response
-                prompt_hash = self._hash_prompt(prompt, model_name, key=key)
-                cached_response = self._get_cached_response(caller_function, model_name, prompt_hash)
-                                
-                if cached_response is not None:
-                    caller = inspect.stack()[1]  # Get immediate caller
-                    print(f"Returning from cache[LLM]:")
-                    print(f"|---> Called from {caller.filename}:{caller.lineno} in {caller.function}")
-
-                    # If response is a Pydantic model, reconstruct it
-                    if response_format is not None:
-                        return response_format.model_validate(cached_response)
-                    
-                    return cached_response["content"]
-            
-            # Get response from LLM
-            res = func(self, 
-                       prompt, 
-                       model_name=model_name, 
-                       response_format=response_format, 
-                       **kwargs)
-            
-            # Prepare response for caching
-            if isinstance(res, ModelResponse):
-                res = res.choices[0].message.content
-                cached_response = res
-            elif isinstance(res, BaseModel):
-                cached_response = res.model_dump()
-            elif isinstance(res, Tuple):
-                if isinstance(res[0], BaseModel):
-                    cached_response = res[0].model_dump()
-                else:
-                    raise Exception(f"Unsupported return type: {type(res)}")
-            else:
-                raise Exception(f"Unsupported return type: {type(res)}")
-                
-            # Cache the response if enabled
-            if cache_enabled:
-                print("Caching response: ", model_name, prompt[:20], key, prompt_hash[:4])
-                self._cache_response(caller_function, model_name, prompt_hash, cached_response)
-                
-            return res
-            
-        return wrapper
 
     def _update_llm_stats(self, usage):
         pass
 
-    @cache_llm_response
+    def _handle_cache(self,
+                     prompt: str | List[ChatMessage],
+                     model_name: str,
+                     response_format: Optional[Type[BaseModel]],
+                     use_cache: bool,
+                     delete_cache: bool,
+                     key: int,
+                     caller_function: str) -> Optional[Any]:
+        """Handle caching logic for invoke method."""
+        if not self.cache or not use_cache:
+            return None
+            
+        if delete_cache:
+            self.cache.delete_entry(caller_function, model_name, prompt, key)
+            return None
+            
+        cached_response = self.cache.get_cached_response(
+            caller_function,
+            model_name,
+            prompt,
+            response_format, 
+            key
+        )
+        return cached_response
+
     def invoke(self, 
                prompt: str | List[ChatMessage],
                *, 
                model_name: str = "gpt-4o", 
                response_format: Optional[Type[BaseModel]] = None,
                use_cache: bool = True,
+               delete_cache: bool = False,
+               key: int = 0,
                **kwargs) -> Any:
         """Modified invoke method with caching."""
+        # Use instance default if use_cache is None
+        use_cache = self.use_cache if use_cache is None else use_cache
+        
+        # Track the call
+        caller_filename, caller_function = self._get_caller_info()
+        self.call_chain.append((caller_filename, caller_function))
+        
+        cached_response = self._handle_cache(
+            prompt,
+            model_name,
+            response_format,
+            use_cache,
+            delete_cache,
+            key,
+            caller_function
+        )
+        if cached_response is not None:
+            return cached_response
+
+        # Format messages
         if isinstance(prompt, str):
             messages = [{
                 "role": "user",
@@ -336,18 +226,24 @@ class LLMModel:
             **kwargs
         )
         cost = raw_response.get("_hidden_params", {}).get("response_cost", 0)
-        
         self.cost += cost
+
+        # Cache the response if enabled
+        if self.cache and use_cache:
+            self.cache.store_cached_response(
+                caller_function,
+                model_name,
+                prompt,
+                res,
+                key
+            )
+        
         return res
     
     def __del__(self):
         """Cleanup database connections on object destruction."""
-        # import traceback
-        # print("Cleaning up database connection. Called from:")
-        # traceback.print_stack()
-
-        if self.db_connection:
-            self.db_connection.close()
+        if self.cache:
+            self.cache.close()
 
 # TODO: change to use generic[t]
 # DESIGN: not sure how to enforce this but we should only allow JSON serializable
@@ -378,10 +274,10 @@ class LMP(Generic[T]):
                use_cache: bool = False,
                # gonna have to manually specify the args to pass into model.invoke
                # or do some arg merging shit here
-               **prompt_args) -> Any:
+               prompt_args: Dict = {}) -> Any:
         prompt = self._prepare_prompt(
             templates=self.templates,
-            **prompt_args
+            **prompt_args,
         )
 
         current_retry = 1
@@ -404,4 +300,116 @@ class LMP(Generic[T]):
                 current_delay = retry_delay * (2 ** (current_retry - 1))
                 time.sleep(current_delay)
                 print(f"Retry attempt {current_retry}/{max_retries} after error: {str(e)}. Waiting {current_delay}s")
+ 
+# TODO: maybe should get rid of Item? Its gonna be a string most of the time
+# TODO: make this generic
+class LMGroupList(BaseModel, ABC):
+    @abstractmethod
+    def get_item_ids(self) -> List[str]:
+        """Returns the prompt ids for each item"""
+        pass    
+
+    @abstractmethod
+    def get_groups(self):
+        pass
+
+class LMGroup(BaseModel, ABC):
+    @abstractmethod
+    def __str__(self) -> str:
+        pass
+
+    @abstractmethod
+    def items(self) -> List[str]:
+        pass
+
+class LMItem(BaseModel, ABC):
+    """
+    Represents an item to be grouped and also act as a translation layer between the LLM
+    and the actual data model
+    """
+    _id: str
+
+    def prompt_id(self) -> str:
+        """Returns a single string id that can be used in the prompt"""
+        return self._id
+
+    @abstractmethod
+    def __str__(self) -> str:
+        """Returns the string representation of the item"""
+        pass
+
+    @abstractmethod
+    def __hash__(self):
+        pass
+         
+class LMTransform(LMP, ABC):
+    response_format: OpsList
+    """
+    Implements a generic LLM transformation operation, iteratively transforming items
+    with the assumption that some items remain leftover after each iteration
+    """
+    def __init__(self):
+        self._iters = 0
+        self._soft_limit = 3 # default number of refinement passes
+        self._hard_limit = 10 # just in case our should stop condition fails
+
+        if not issubclass(self.response_format, OpsList):
+            raise Exception("response_format must be a subclass of OpsList")
+
+        # TODO: template string checking code is not wokring as intended
+        if "{{items}}" not in self.prompt:
+            raise Exception("prompt template must contain '{{items}}' keyword")
+
+        super().__init__()
+
+    @abstractmethod
+    def _apply_ops(self, ops: OpsList, items: List[LMItem]) -> List[LMItem]:
+        pass
+
+    def _should_stop(self, leftover: List[LMItem]) -> bool:
+        """Stopping condition depends on any of items or _num_iters"""
+        return self._iters == self._soft_limit
     
+    def _prepare_prompt(self, items: List[LMItem], **kwargs) -> str:
+        """Prepares the prompt by formatting the items into strings"""
+        
+        return super()._prepare_prompt(
+            items="\n".join([str(item) for item in items]),
+            **kwargs
+        )
+    
+    def invoke(self,
+               model: LLMModel,
+               model_name: str = "claude",
+               use_cache: bool = False,
+               items: List[LMItem] = []) -> List[LMItem]:
+        if not items:
+            raise Exception("items must be a non-empty list of LMItem instances")
+
+        if not all([isinstance(item, LMItem) for item in items]):
+            raise Exception("items must be a list of LMItem instances")
+
+        all_modified_items = []
+        leftover_items = items
+        stop = False
+        while not stop:
+            prompt = self._prepare_prompt(items=leftover_items)  
+            # its important here that within invoke, the representation for item is a
+            # string; this allows arbitrarily small representations
+            res = model.invoke(prompt,
+                             model_name=model_name,
+                             response_format=self.response_format, 
+                             use_cache=use_cache)
+            modified_cases = self._apply_ops(res.ops, leftover_items)
+            all_modified_items = all_modified_items + [
+                # check against hallucinated ids
+                case for case in modified_cases if case.prompt_id() 
+                in [item.prompt_id() for item in leftover_items]
+            ]
+            leftover_items = [item for item in leftover_items if item not in all_modified_items]
+            stop = self._should_stop(leftover_items)
+            self._iters += 1
+            if self._iters == self._hard_limit or len(leftover_items) == 0:
+                break
+
+        return all_modified_items

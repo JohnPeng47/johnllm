@@ -15,6 +15,7 @@ pydantic = "*"
 tiktoken = "*"
 litellm = "*"
 instructor = "1.7.3"
+dotenv = "*"
 
 [build-system]
 requires = ["poetry-core"]
