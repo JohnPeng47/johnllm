@@ -1,7 +1,6 @@
 from typing import Optional, Any
 from pydantic import BaseModel
 
-
 class CompletionTokensDetails(BaseModel):
     accepted_prediction_tokens: Optional[int] = None
     audio_tokens: int = 0
