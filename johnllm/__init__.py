@@ -1,4 +1,5 @@
-from .src.core import LLMModel, LMP, LMTransform, LMItem
+from .src.core import LLMModel, LMP
+from .src.lmps.transform import LMTransform, LMItem
 from .src.ops import Op, OpsList
 from .src.lmps.transform import *
 

@@ -84,7 +84,7 @@ def deepseek_instructor():
                         content = content.split("```json")[1].split("```")[0]
 
                     parsed = json.loads(content)
-                    return response_model.model_validate(parsed), res
+                    return response_model.model_validate(parsed), convert_instructor_usage(res)
 
     return DeepseekClient()
 ###############################################
@@ -169,10 +169,19 @@ class LLMModel:
             key
         )
         return cached_response
+    
+    def get_cost(self, chat_response):
+        try: 
+            cost = chat_response.get("_hidden_params", {}).get("response_cost", 0)
+        except AttributeError:
+            # TODO: support this or check if latest LiteLLM has proper deepseek support now
+            cost = 0
+
+        return cost
 
     def invoke(self, 
                prompt: str | List[ChatMessage],
-               *, 
+               *,
                model_name: str = "gpt-4o", 
                response_format: Optional[Type[BaseModel]] = None,
                use_cache: bool = True,
@@ -212,20 +221,18 @@ class LLMModel:
 
         # TODO: hack because litellm/deepseek client does not work with instructor
         if model_name == "deepseek/deepseek-chat":
-            print("using deepseek client")
             llm_client = deepseek_instructor()
             model_name = "deepseek-chat"
         else:
             llm_client = client
 
-        print(llm_client)
         res, raw_response = llm_client.chat.completions.create_with_completion(
             model=model_name,
             messages=messages,
             response_model=response_format,
             **kwargs
         )
-        cost = raw_response.get("_hidden_params", {}).get("response_cost", 0)
+        cost = self.get_cost(raw_response)
         self.cost += cost
 
         # Cache the response if enabled

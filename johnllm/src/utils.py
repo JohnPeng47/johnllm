@@ -3,19 +3,19 @@ from pydantic import BaseModel
 
 class CompletionTokensDetails(BaseModel):
     accepted_prediction_tokens: Optional[int] = None
-    audio_tokens: int = 0
-    reasoning_tokens: int = 0
+    audio_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
     rejected_prediction_tokens: Optional[int] = None
 
 class PromptTokensDetails(BaseModel):
-    audio_tokens: int = 0
-    cached_tokens: int = 0
+    audio_tokens: Optional[int] = None
+    cached_tokens: Optional[int] = None
 
 class CompletionUsage(BaseModel):
     completion_tokens: int
     prompt_tokens: int
     total_tokens: int
-    completion_tokens_details: CompletionTokensDetails
+    completion_tokens_details: Optional[CompletionTokensDetails]
     prompt_tokens_details: PromptTokensDetails
 
     def __getitem__(self, key: str) -> Any:
