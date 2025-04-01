@@ -14,6 +14,7 @@ import tiktoken
 
 import instructor   
 from litellm import completion
+from litellm.types.utils import ModelResponse
 from pydantic import BaseModel
 
 from .utils import CompletionUsage
@@ -32,8 +33,8 @@ def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> i
 
 SHORT_NAMES = {
     "gpt-4o" : "gpt-4o",
-    "claude" : "claude-3-5-sonnet-20240620",
-    "deepseek" : "deepseek/deepseek-chat"
+    "claude" : "claude-3-5-sonnet-20240620", 
+    "deepseek/deepseek-chat": "deepseek/deepseek-chat"
 }
 
 ### TEMPORARY INSTRUCTOR IMPLEMENATION FOR DEEPSEEK
@@ -94,7 +95,18 @@ class LLMVerificationError(Exception):
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | dict  # Modified to support both text and image content
+
+def _format_message_content(content: str | dict | List[dict]) -> str | dict | List[dict]:
+    """Helper function to format message content properly"""
+    if isinstance(content, str):
+        return content
+    elif isinstance(content, dict) and "type" in content:
+        return content  # Already formatted image content
+    elif isinstance(content, list):
+        return content  # Already formatted content array
+    else:
+        raise ValueError("Invalid message content format")
 
 client = instructor.from_litellm(completion)
 
@@ -128,9 +140,6 @@ class LLMModel:
         
         # Add call chain tracking
         self.call_chain = []
-
-    def get_cost(self) -> float:
-        return self.cost
 
     def _read_config(self, fp: Path):
         return {}
@@ -174,13 +183,13 @@ class LLMModel:
         try: 
             cost = chat_response.get("_hidden_params", {}).get("response_cost", 0)
         except AttributeError:
-            # TODO: support this or check if latest LiteLLM has proper deepseek support now
+            # TODO: add support for openai client here
             cost = 0
 
         return cost
 
     def invoke(self, 
-               prompt: str | List[ChatMessage],
+               prompt: str | List[ChatMessage] | dict,
                *,
                model_name: str = "gpt-4o", 
                response_format: Optional[Type[BaseModel]] = None,
@@ -188,7 +197,7 @@ class LLMModel:
                delete_cache: bool = False,
                key: int = 0,
                **kwargs) -> Any:
-        """Modified invoke method with caching."""
+        """Modified invoke method with caching and image support."""
         # Use instance default if use_cache is None
         use_cache = self.use_cache if use_cache is None else use_cache
         
@@ -215,26 +224,45 @@ class LLMModel:
                 "content": prompt,
             }]
         elif isinstance(prompt, list):
-            messages = [m.dict() for m in prompt]
-            
+            messages = []
+            for msg_dict in prompt:
+                # msg_dict = m.dict()
+                msg_dict["content"] = _format_message_content(msg_dict["content"])
+                messages.append(msg_dict)
+        elif isinstance(prompt, dict):
+            # Handle single message with image content
+            messages = [{
+                "role": "user",
+                "content": _format_message_content(prompt),
+            }]
+        
         model_name = SHORT_NAMES[model_name]
 
         # TODO: hack because litellm/deepseek client does not work with instructor
-        if model_name == "deepseek/deepseek-chat":
-            llm_client = deepseek_instructor()
-            model_name = "deepseek-chat"
+        if not response_format:
+            llm_client = completion
+            res = llm_client(
+                model=model_name,
+                messages=messages,  
+                **kwargs
+            )
+            raw_response = None
         else:
-            llm_client = client
+            if model_name == "deepseek/deepseek-chat":
+                llm_client = deepseek_instructor().chat.completions.create_with_completion
+                model_name = "deepseek-chat"
+            else:
+                llm_client = client.chat.completions.create_with_completion
 
-        res, raw_response = llm_client.chat.completions.create_with_completion(
-            model=model_name,
-            messages=messages,
-            response_model=response_format,
-            **kwargs
-        )
-        cost = self.get_cost(raw_response)
+            res, raw_response = llm_client(
+                model=model_name,
+                messages=messages, 
+                response_model=response_format,
+                **kwargs
+            )
+
+        cost = self.get_cost(raw_response)  
         self.cost += cost
-
         # Cache the response if enabled
         if self.cache and use_cache:
             self.cache.store_cached_response(
@@ -245,6 +273,9 @@ class LLMModel:
                 key
             )
         
+        if isinstance(res, ModelResponse):
+            res = res.choices[0].message.content
+
         return res
     
     def __del__(self):
