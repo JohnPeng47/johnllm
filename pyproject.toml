@@ -16,6 +16,7 @@ tiktoken = "*"
 litellm = "*"
 instructor = "1.7.3"
 dotenv = "*"
+langchain_core = "*"
 
 [build-system]
 requires = ["poetry-core"]

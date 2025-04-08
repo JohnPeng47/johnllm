@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel
 import tiktoken
 
+from langchain_core.messages import BaseMessage
 import instructor   
 from litellm import completion
 from litellm.types.utils import ModelResponse
@@ -103,6 +104,7 @@ def _format_message_content(content: str | dict | List[dict]) -> str | dict | Li
         return content
     elif isinstance(content, dict) and "type" in content:
         return content  # Already formatted image content
+    # wtf is this ??
     elif isinstance(content, list):
         return content  # Already formatted content array
     else:
@@ -189,7 +191,7 @@ class LLMModel:
         return cost
 
     def invoke(self, 
-               prompt: str | List[ChatMessage] | dict,
+               prompt: str | List[Dict] | List[BaseMessage],
                *,
                model_name: str = "gpt-4o", 
                response_format: Optional[Type[BaseModel]] = None,
@@ -197,14 +199,43 @@ class LLMModel:
                delete_cache: bool = False,
                key: int = 0,
                **kwargs) -> Any:
-        """Modified invoke method with caching and image support."""
+        """
+        Supports the following message types
+
+        1. New OAI content type
+        message = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{read_image_as_b64('bamler.jpeg')}",
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "Describe the contents of this image"
+                }
+            ]
+        }]
+        
+        2. Old OAI format with content == string
+        message = [
+            {
+                "role":"user",
+                "content":"what is the tallest tower in the world?"
+            }
+        ]    
+
+        3. String
+        message = "What is the tallest tower in the world"
+        """
         # Use instance default if use_cache is None
         use_cache = self.use_cache if use_cache is None else use_cache
         
         # Track the call
         caller_filename, caller_function = self._get_caller_info()
         self.call_chain.append((caller_filename, caller_function))
-        
         cached_response = self._handle_cache(
             prompt,
             model_name,
@@ -217,7 +248,7 @@ class LLMModel:
         if cached_response is not None:
             return cached_response
 
-        # Format messages
+        # handle different input message types
         if isinstance(prompt, str):
             messages = [{
                 "role": "user",
@@ -225,16 +256,21 @@ class LLMModel:
             }]
         elif isinstance(prompt, list):
             messages = []
-            for msg_dict in prompt:
-                # msg_dict = m.dict()
-                msg_dict["content"] = _format_message_content(msg_dict["content"])
+            for msg in prompt:
+                if isinstance(msg, BaseMessage):
+                    role = "user" if msg.type == "human" else msg.type                    
+                    msg_dict = {
+                        "role": role,
+                        "content": _format_message_content(msg.content)
+                    }
+                    if msg.additional_kwargs:
+                        msg_dict.update(msg.additional_kwargs)
+                else:
+                    msg_dict = msg.copy()
+                    msg_dict["content"] = _format_message_content(msg_dict["content"])
                 messages.append(msg_dict)
-        elif isinstance(prompt, dict):
-            # Handle single message with image content
-            messages = [{
-                "role": "user",
-                "content": _format_message_content(prompt),
-            }]
+        else:
+            raise TypeError(f"Unsupported message type for prompt: {type(prompt)}")
         
         model_name = SHORT_NAMES[model_name]
 

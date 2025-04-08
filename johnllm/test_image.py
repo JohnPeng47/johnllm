@@ -21,26 +21,26 @@ def read_image_as_b64(image_path: str) -> str:
         base64_string = base_64_encoded_data.decode("utf-8")
         return base64_string
 
-# message = [{
-#     "role": "user",
-#     "content": [
-#         {
-#             "type": "image_url",
-#             "image_url": {
-#                 "url": f"data:image/jpeg;base64,{read_image_as_b64('bamler.jpeg')}",
-#             },
-#         },
-#         {
-#             "type": "text",
-#             "text": "Describe the contents of this image"
-#         }
-#     ]
-# }]
-
 message = [{
     "role": "user",
-    "content": "What is the capital of France?"
+    "content": [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{read_image_as_b64('bamler.jpeg')}",
+            },
+        },
+        {
+            "type": "text",
+            "text": "Describe the contents of this image"
+        }
+    ]
 }]
+
+# message = [{
+#     "role": "user",
+#     "content": "What is the capital of France?"
+# }]
 
 model = LLMModel()
 res = model.invoke(message, model_name="gpt-4o", response_format=None)

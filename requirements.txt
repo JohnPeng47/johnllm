@@ -1,0 +1,7 @@
+jinja2
+pydantic
+tiktoken
+litellm
+instructor==1.7.3
+python-dotenv
+langchain-core
