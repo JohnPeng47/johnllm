@@ -13,8 +13,8 @@ from pydantic import BaseModel
 import tiktoken
 
 from langchain_core.messages import BaseMessage
-import instructor   
 from litellm import completion
+import instructor   
 from litellm.types.utils import ModelResponse
 from pydantic import BaseModel
 
@@ -34,8 +34,10 @@ def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> i
 
 SHORT_NAMES = {
     "gpt-4o" : "gpt-4o",
+    "gpt-4o-mini": "gpt-4o-mini",
     "claude" : "claude-3-5-sonnet-20240620", 
-    "deepseek/deepseek-chat": "deepseek/deepseek-chat"
+    "deepseek-chat": "deepseek-chat",
+    "deepseek-reasoner" : "deepseek-reasoner"
 }
 
 ### TEMPORARY INSTRUCTOR IMPLEMENATION FOR DEEPSEEK
@@ -284,9 +286,8 @@ class LLMModel:
             )
             raw_response = None
         else:
-            if model_name == "deepseek/deepseek-chat":
+            if "deepseek" in model_name:
                 llm_client = deepseek_instructor().chat.completions.create_with_completion
-                model_name = "deepseek-chat"
             else:
                 llm_client = client.chat.completions.create_with_completion
 
