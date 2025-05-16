@@ -33,6 +33,7 @@ def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> i
     return num_tokens
 
 SHORT_NAMES = {
+    "gpt-4.1": "gpt-4.1",
     "gpt-4o" : "gpt-4o",
     "gpt-4o-mini": "gpt-4o-mini",
     "claude" : "claude-3-5-sonnet-20240620", 
